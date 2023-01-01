@@ -1,0 +1,664 @@
+---
+title: "Supercell Report"
+author: "Hung Nguyen"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+urlcolor: blue
+---
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# Load packages
+library(ggplot2)
+library(tidyr)
+library(reshape2)
+library(cowplot)
+library(RSQLite)
+library(grid)
+library(gt)
+library(data.table)
+```
+
+# Warmup: Revenue analysis
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Load database
+conn <- dbConnect(RSQLite::SQLite(), "sample.sqlite")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a table calculate monthly revenue
+time_series_revenue <- dbGetQuery(conn, "
+                                  SELECT 
+                                    SUM(iap_price_usd_cents)/100.0 AS 'revenue', 
+                                    SUBSTRING(created_time, 6, 2) as `month`
+                                  FROM iap_purchase
+                                  GROUP BY month
+                                  ")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate monthly percentage change of revenue compared to the prior month
+percent_change <- c(0)
+time_series_revenue_change <- time_series_revenue
+
+for(i in 2:nrow(time_series_revenue)) {
+  ratio = (time_series_revenue$revenue[i] - time_series_revenue$revenue[i-1])/time_series_revenue$revenue[i-1]*100
+  percent_change = c(percent_change, ratio)
+}
+time_series_revenue_change$revenue <- percent_change
+```
+
+## Revenue trend analysis
+We can examine the time series revenue and the revenue change during 2016 to analyze its trend:
+
+- **Monthly revenue for 2016** measures the total revenue from users' purchases for each month.
+- **Percent change in revenue compared to the prior month** measures the change in revenue (in percent) compared to the previous one for each month. (For January, it is assumed that the percent change is 0)
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=14, fig.height=6}
+# Plot monthly revenue 
+plot1 <- ggplot(data=time_series_revenue, aes(x=month, y=revenue, group=1)) +
+  geom_bar(stat="identity", fill="deepskyblue2") +
+  geom_smooth(method="loess", level=0, aes(color="Trend line")) +
+  coord_cartesian(ylim=c(1000, NA)) +
+  geom_abline(aes(slope=0, intercept=mean(revenue), color="Mean revenue"), linetype="dashed", linewidth=1) +
+  scale_color_manual(values=c("Mean revenue"="coral", "Trend line"="red")) +
+  labs(x="Month", y="Revenue (in USD)", title="Monthly revenue for 2016", color="Legend") +
+  theme(plot.title = element_text(hjust = 0.5, size=17, face="bold"), 
+        legend.position = "top",
+        axis.title.x = element_text(size=13), 
+        axis.title.y = element_text(size=13), 
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Plot monthly percentage change
+plot2 <- ggplot(data=time_series_revenue_change, aes(x=month, y=revenue, group=1)) +
+  geom_line(color="deepskyblue4", linewidth=1) +
+  labs(x="Month", y="Change in revenue (in percent)", title="Percent change in revenue compared to the prior month", color="Legend") +
+  theme(plot.title = element_text(hjust = 0.5, size=17, face="bold"), 
+        legend.position = "top",
+        axis.title.x = element_text(size=13), 
+        axis.title.y = element_text(size=13), 
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  geom_hline(yintercept = 0) 
+
+# Align plots
+ggdraw() + 
+  draw_plot(plot1, x=0, y=0, width=0.5, height=1) +
+  draw_plot(plot2, x=0.5, y=0, width=0.5, height=1)
+```
+From the first graph, we can first see that the most noticeable peak revenue is in January, which is at climax with around USD 6000 in revenue. Meanwhile, the revenue trough occurs in September with less than USD 3000 generated. We can also observe that the only times the revenue remains above the mean are the first three months of the year: January (around USD 6000), February (around USD 5500) and March (around USD 4300). It is also worthwhile to notice the change from month 9 to 10, where we can clearly observe a great bounce back from the revenue trough by over USD 1000 gained more in October, compared the prior month. Apart from that, during May to December, the revenue in general witnesses no other significant change. It gradually falls from January until reaching below the mean, then remains quite stable since then with only small business cycle fluctuations. This trend is also suggested by the trend line, where the revenue begins from January with the highest peak and has some falling actions until becoming relatively stable below the mean revenue since May. 
+
+From the second plot, we can notice that the changes are stable for the most part as it would take some time remaining negative (or positive) before changing to the opposite side again. This is not to mention the rise from month 9 and 10, where it is observed as the peak percentage change with around 50% of change; this is expected as in the previous plot a bounce back from a revenue trough during this period is already mentioned. In addition, we can also see that the change in revenue spends a longer duration being negative than positive, indicating that the revenue throughout the year is more likely to fall than to rise. 
+
+## Geographic split of revenue:
+In this section, we are going to assess the geographic split in revenues with respect to the top 10 countries with the highest revenue and with respect to continental and product type aspects. Analyzing the top 10 most revenue generated countries will help identity specifically the most potential markets to be taken care of. In order to look at statistics in a greater scope because of the high volume of countries, we may look into the most potential continents along with the revenue from each package in these market.
+
+We can first analyze the revenue from the top 10 highest revenue generated countries as follows:
+
+- **Top 10 countries with highest revenue** measures the revenue for each of the top 10 highest-revenue countries.
+- **Number of purchase and paying user for each country** has two quantities of interest: *Number of purchase* measures the number of purchase made by users (can be multiple times), and *Number of paying user* measures the number of different user within that country purchasing at least one package. The selected countries are the same as the top 10 countries with highest revenue.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a table calculating top 10 highest-revenue countries
+geo_split_revenue <- na.omit(dbGetQuery(conn, "
+                                        SELECT 
+                                          country_code, 
+                                          SUM(iap_price_usd_cents) / 100.0 AS 'revenue'
+                                        FROM account, iap_purchase
+                                        WHERE account.account_id = iap_purchase.account_id
+                                        GROUP BY country_code
+                                        ORDER BY revenue DESC
+                                        LIMIT 10
+                                        "))
+
+# Create a table calculating number of purchase and paying user of countries in the top 10 highest revenue
+geo_split_purchase <- na.omit(dbGetQuery(conn, "
+                                        SELECT 
+                                          country_code, 
+                                          COUNT(*) AS 'Number of purchase', 
+                                          COUNT(DISTINCT iap_purchase.account_id) AS 'Number of paying user',
+                                          SUM(iap_price_usd_cents) / 100.0 AS 'revenue'
+                                        FROM account, iap_purchase
+                                        WHERE account.account_id = iap_purchase.account_id AND 
+                                              country_code IN (SELECT 
+                                                                country_code
+                                                              FROM account, iap_purchase
+                                                              WHERE account.account_id = iap_purchase.account_id
+                                                              GROUP BY country_code
+                                                              ORDER BY SUM(iap_price_usd_cents) DESC
+                                                              LIMIT 10)
+                                        GROUP BY country_code
+                                        ORDER BY revenue DESC
+                                        "))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Melt the table for plotting purposes
+geo_split_purchase <- reshape2::melt(geo_split_purchase, c("country_code", "revenue"))
+```
+
+```{r, echo=FALSE, results='hide', fig.align='center', fig.height=7, fig.width=14}
+# Plot the top 10 highest-revenue countries
+plot1 <- ggplot(data=geo_split_purchase, aes(y=reorder(country_code, revenue), x=value, fill=variable)) +
+  geom_bar(stat="identity", position='dodge') +
+  geom_text(aes(label=value), hjust=-0.5, vjust=0.35, size=3, position=position_dodge(0.85)) +
+  scale_x_continuous(expand=c(0, 0), limits=c(0, 5100)) +
+  scale_fill_manual(values=c("Number of purchase"="deepskyblue2", "Number of paying user"="deepskyblue4")) +
+  labs(x="Number of purchase / user", y="Country", title="Number of purchase and paying user for each country", fill="") +
+  theme(plot.title = element_text(hjust = 0.5, size=18, face="bold"), 
+        axis.title.x = element_text(size=13), 
+        axis.title.y = element_text(size=13), 
+        legend.position = "top",
+        legend.key.size = unit(0.5, 'cm'),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Plot the number of purchase and paying user of countries in the top 10 highest revenue
+plot2 <- ggplot(data=geo_split_revenue, aes(y=reorder(country_code, revenue), x=revenue)) +
+  geom_bar(stat="identity", fill="deepskyblue2") +
+  geom_text(aes(label=revenue), hjust=-0.2, size=3) +
+  scale_x_continuous(expand=c(0, 0), limits=c(0, 14700), breaks=seq(0, 14700, 2500)) +
+  labs(x="Revenue (in USD)", y="Country", title="Top 10 countries with highest revenue") + 
+  theme(plot.title = element_text(hjust = 0.5, size=18, face="bold", margin=margin(0, 0, 40, 0)),
+        axis.title.x = element_text(size=13), 
+        axis.title.y = element_text(size=13), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+
+# Align the plots
+ggdraw() + 
+  draw_plot(plot2, x=0, y=0, width=0.5, height=1) +
+  draw_plot(plot1, x=0.5, y=0, width=0.5, height=1)
+```
+It can be seen from the second plot that the two countries with the most significant difference among the others having the highest number of paying user, purchase, as well as re-purchase are `US` (top 2) and `CN` (top 1). In the first plot, as expected, it is clear that the top two countries with the highest revenue are also `US` and `CN`, though the revenues generated by `CN` are relatively smaller compared to that of `US`. This shows that `US` is a high monetization market, while `CN` is a high volume region. Nonetheless, the plot strongly suggests the exceptionally higher demand for the products within both countries.  
+
+Although the sales are not as impressive as `CN` and `US`, country `KR`, having slightly the same paying users and purchases as other countries excluding the top 2, generates a noticeably higher revenue than the lower ones and place itself in the top 3 highest revenue generated country. It is also worthwhile to notice that country `CH` and `CO`, having a significantly smaller portion of paying users and purchases than others, can generate such a revenue to place themselves in the top 6 and 10, respectively. This might be explained that the packages with higher price are more popular among `KR`, `CH`, and `CO` and the average revenue per paying user (ARPPU) is greater.
+
+We can also look into the the revenue with respect to each continental and each package to assess the data from a greater scope. For the continental split, a mapping of each country to the corresponding continents are used (the info can be found in the References section). For the packages, we only take the first 3 characters of the package ID `package_id_hash`, because it is enough to differentiate between the packages using that information; moreover, this can improves the visualization by avoiding displaying too much characters.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a table calculating revenue by continent and package id
+continent_split_revenue <- na.omit(dbGetQuery(conn, "
+                                              SELECT 
+                                                country_code, 
+                                                SUBSTRING(package_id_hash, 1, 3) AS 'packageid',
+                                                SUM(iap_price_usd_cents) / 100.0 AS 'revenue'
+                                              FROM
+                                                account, iap_purchase
+                                              WHERE account.account_id = iap_purchase.account_id 
+                                              GROUP BY packageid, country_code
+                                              ORDER BY revenue DESC
+                                              "))
+```
+
+```{r, echo=FALSE, results='hide'}
+# Read continent mapping data
+continent_map <- read.csv("continents.csv")
+continent_map <- na.omit(subset(continent_map, select=c("alpha.2", "region")))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Map each country to its corresponding continent
+country_list <- continent_split_revenue$country_code
+continent_list <- c()
+total_revenue <- c()
+
+# Create a mapping of each continent corresponding to each country in the data
+for(i in country_list) {
+  continent_list <- c(continent_list, continent_map[continent_map$alpha.2 == i,]$region)
+}
+continent_split_revenue <- cbind(continent_split_revenue, continent_list)
+
+# Calculate total revenue for each continent (for plotting purposes)
+for(i in continent_list) {
+  total_revenue <- c(total_revenue, sum(continent_split_revenue[continent_split_revenue$continent_list == i,]$revenue))
+}
+continent_split_revenue <- cbind(continent_split_revenue, total_revenue)
+
+# Calculate total revenue
+sum_revenue <- sum(unique(subset(continent_split_revenue, select=c("continent_list", "total_revenue")))$total_revenue)
+```
+
+```{r, echo=FALSE, fig.width=10, fig.height=6, message=FALSE, out.width='90%', fig.align='center'}
+# Plot revenue by continent and package id
+ggplot(data=continent_split_revenue, aes(x=(reorder(continent_list, -total_revenue)), y=revenue, fill=packageid)) +
+  geom_bar(stat="identity") + 
+  scale_fill_brewer(palette="RdBu", direction=-1) +
+  scale_y_continuous(expand=c(0, 0), limits=c(0, 21000)) + 
+  labs(x="Continent", y="Revenue (in USD)", title="Revenue with respect to continent and package type", fill="Package ID") +
+  geom_text(aes(y=total_revenue, label=paste(total_revenue, " (", round(100*total_revenue/sum_revenue,2), "%)", sep="")), size=3.5, vjust=-1, check_overlap = TRUE) +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"), 
+        legend.position = "top",
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  geom_hline(yintercept = 0) 
+```
+
+With over double the revenue generated compared to the top 3 continent Europe, Asia (top 1) and Americas (top 2) generate the most distinctive and highest revenue, with 43.52% and 38.4% contribution to total revenue. This is expected, as `CN` and `US`, being the top 2 highest contributors in terms of revenue and number of paying user, are located in Asia and Americas, respectively. Meanwhile, it is clear that Oceania and Africa only contribute very little (only 1.2% and 0.09%), showing that the market at these continents are quite small.
+
+In addition, we can also observe the popularity of each package within each continent. For Asia, `a2f` brings about the most revenue among other packages, with around USD 7000 (more than a third of total revenue in Asia) among other packages, which is more than the revenue of the same product in any other continent. The same thing goes to Americas, where the sales of the package `ae0` and `4a4` are the highest ones and the consumption of theses products are higher than any other continent. Apart from that, it is also worthwhile to notice the revenue from the package `99a`, `dd4` are relatively the same within the top 3, while the remaining packages `3a5`, `efd`, `f82`, `e22` and `889` only contribute considerably smaller portions of revenue, or do not contribute at all.
+
+\newpage
+
+# Task 1. Lifetime Reveue (LTV)
+
+## LTV definition
+Lifetime revenue is a metric that captures the total amount of revenue a user spends on company's business during the entire course of the user's relationship with the company.
+
+## Predict players LTV during their first week in-game:
+The "top-down" monetization approach is used to calculate LTV, where it aims to measure the revenue that customer spend over their whole lifespan in the game. The following three assumptions were made for this problem:
+
+- The main priority is revenue. Therefore, the only segment of user taken into account is paying user. In addition, the metric Average revenue per paying user (ARPPU) is used instead of the commonly used metric Average revenue per user (ARPU) for this method. As the proportion of paying user only counts very little compared to non-paying ones according to the data (Only 1.37%), it is better to use ARPPU because it disregards the large noise from users that does not generate any revenue for the company and more accurately models the actual population that contributes to the revenue.
+- Most of the LTV of a user is generated within early in-game time of the user and then decays over time. Thus, Logarithmic Regression will be used to model this behavior.
+- LTV will be modeled over a period of 180 days. As there is little information on the company status and the genre of the game itself to choose a suitable period, I assume the game is casual and the 180-day period is chosen because it is common for most casual games, according to Seufert E. (2014).
+
+From the data, ARPPU is extracted by daily cohort to form a table. The first column `reg_date` contains registration date, the second column `registrations` contains the total number of user creating their account for the first time during that date, while the columns `1`,`2`,..., `361` contain users' ARPPU from 1, 2,..., 361 days from their corresponding registration date. A snapshot of daily ARPPU is provided as follows:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a table calculating ARPPU for each registration day
+daily_arppu <- dbGetQuery(conn, "
+                    SELECT 
+                      reg_date, 
+                      days_from_reg,
+                      SUM(revenue) / COUNT(DISTINCT account_id) AS 'ARPPU',
+                      registrations
+                      
+                    FROM
+                      (SELECT 
+                        iap_purchase.account_id,
+                        SUBSTRING(account.created_time, 1, 10) AS 'reg_date',
+                        CAST(( JulianDay(iap_purchase.created_time) - JulianDay(account.created_time) + 1)
+                               AS INTEGER ) AS 'days_from_reg',
+                        iap_price_usd_cents / 100.0 AS 'revenue'
+                      FROM iap_purchase, account
+                      WHERE iap_purchase.account_id = account.account_id)
+                      
+                    LEFT JOIN (   
+                      SELECT 
+                        reg_date AS 'reg_date1',
+                        COUNT(DISTINCT account_id) AS 'registrations'
+                        
+                      FROM
+                        (SELECT 
+                          iap_purchase.account_id,
+                          SUBSTRING(account.created_time, 1, 10) AS 'reg_date'
+                        FROM iap_purchase, account
+                        WHERE iap_purchase.account_id = account.account_id)
+                        
+                      GROUP BY reg_date
+                    ) AS 'regis' 
+                    ON regis.reg_date1 = reg_date
+                    
+                    GROUP BY reg_date, days_from_reg
+                    ORDER BY reg_date, days_from_reg
+                   ")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a pivot table for the table above for easier data manipulation
+daily_arppu <- pivot_wider(data=daily_arppu, names_from=days_from_reg, values_from=ARPPU)
+order_col <- as.character(sort(as.numeric(colnames(daily_arppu)[!colnames(daily_arppu) %in% c("reg_date", "registrations")])))
+daily_arppu <- daily_arppu[,c("reg_date", "registrations", order_col)]
+
+# Print out snapshot of table
+head(daily_arppu[1:7], 6) %>% gt() 
+```
+
+From this, we calculate the weighted average ARPPU of the user cohort for each day 1, 2,..., 361 days, with the values are the ARPPU from the rows of each column `1`,`2`,..., `361` and the corresponding weights are the `registrations` amount. A snapshot of 5 first days corresponding to the table above can be given as:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate weighted average for each day
+ARPPU_vector <- c()
+for(i in 3:ncol(daily_arppu)) {
+  ARPPU_vector = c(ARPPU_vector, weighted.mean(daily_arppu[i], daily_arppu[2], na.rm=TRUE))
+}
+
+# Create a data frame to store weighted average value 
+day <- as.numeric(colnames(daily_arppu)[!colnames(daily_arppu) %in% c("reg_date", "registrations")]) 
+daily_avg <- data.frame(day=day, arppu=ARPPU_vector)
+
+# Create a transpose of the data frame to display 
+daily_avg_transpose <- transpose(daily_avg)
+daily_avg_transpose <- daily_avg_transpose[-1,]
+colnames(daily_avg_transpose) <- as.numeric(rownames(daily_avg)) 
+rownames(daily_avg_transpose) <- NULL
+
+# Display transposed data frame
+as_tibble(daily_avg_transpose[1:5]) %>% gt() 
+```
+
+As mentioned above, we will use Logarithmic Regression to model the behavior of daily ARPPU. The equation of the function is given as follows:
+\[
+\begin{gathered}
+y = a \ ln(x) + b, \\
+\text{where } x \text{ is the number of days since installed, and }y \text{ is the projected LTV}
+\end{gathered}
+\]
+
+From fitting a Logarithmic Regression model into the 361-day ARPPU data, we obtain the following coefficients:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Fit a Logarithmic Regression model into the weighted average ARPPU data
+fit <- lm(daily_avg$arppu ~ log(daily_avg$day))
+
+# Display the coefficients
+data.frame(intercept=coef(fit)[[1]], slope=coef(fit)[[2]]) %>% gt() 
+```
+
+Therefore, we obtain the following curve of best fit:
+\[
+\begin{gathered}
+y = 0.3537022 \ ln(x) + 5.275918, \\
+\text{where } x \text{ is the number of days since installed, and }y \text{ is the projected LTV}
+\end{gathered}
+\]
+
+Using this equation, we can model the approximate spending behavior of a user and predict the cumulative ARPPU as well as the LTV for the next 180 days since that user's first registration for the game account:
+
+```{r, echo=FALSE, message=FALSE, fig.width=10, fig.height=6, out.width='90%', fig.align='center'}
+# Plot the 180-day LTV
+ggplot(mapping=aes(x=1:185, y=coef(fit)[[1]] + coef(fit)[[2]] * log(1:185))) +
+  geom_line(color="deepskyblue4", linewidth=1) +
+  scale_x_continuous(expand=c(0, 0), breaks=c(7, 30, 60, 90, 120, 150, 180)) +
+  scale_y_continuous(expand=c(0, 0), limits=c(4, 9), breaks=c(round(coef(fit)[[1]] + coef(fit)[[2]] * log(7), 2), round(coef(fit)[[1]] + coef(fit)[[2]] * log(180), 2))) +
+  geom_segment(aes(x=0, y=coef(fit)[[1]] + coef(fit)[[2]] * log(7), xend=7, yend=coef(fit)[[1]] + coef(fit)[[2]] * log(7)), linetype="dashed", linewidth=1, color="deepskyblue2") +
+  geom_segment(aes(x=7, y=coef(fit)[[1]] + coef(fit)[[2]] * log(7), xend=7, yend=4), linetype="dashed",  linewidth=1, color="deepskyblue2") +
+  geom_segment(aes(x=0, y=coef(fit)[[1]] + coef(fit)[[2]] * log(180), xend=180, yend=coef(fit)[[1]] + coef(fit)[[2]] * log(180)), linetype="dashed", linewidth=1, color="deepskyblue2") +
+  geom_segment(aes(x=180, y=coef(fit)[[1]] + coef(fit)[[2]] * log(180), xend=180, yend=4), linetype="dashed",  linewidth=1, color="deepskyblue2") +
+  geom_point(aes(x=7, y=(coef(fit)[[1]] + coef(fit)[[2]] * log(7)))) +
+  geom_point(aes(x=180, y=(coef(fit)[[1]] + coef(fit)[[2]] * log(180)))) +
+  labs(x="Day", y="ARPPU", title="Predicted LTV for a 180-day period") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"), 
+        legend.position = "top",
+        axis.text = element_text(size=11),
+        axis.title = element_text(size=13),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.grid.major.x = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+
+```
+
+The line graph models the cumulative ARPPU, or the average spending behavior of a (paying) user throughout his estimated lifetime of 180 days. At day 180, user retention period ends and the LTV is $7.11$. Therefore, during the first week (7 days) since their first install of the game, the proportion of total LTV (for an 180-day period) a user generates is:
+$$
+\frac{5.96}{7.11}=83.83\%
+$$
+
+\newpage
+
+## Analyze monthly LTV from January to December 
+In this section, in order to have a general assessment for the LTV during 2016, we will look into the monthly LTV from January to December. In addition, the monthly LTV statistic will be analyzed separately for different platforms (iOS and Android) through user segmentation. Users are acquired through different platforms and their spending behavior can be distinctive, and this suggests the need to analyze the trend for LTV separately through different channels.
+
+The "top-down" monetization approach is again used to calculate LTV of an average paying user for each of the 12 months. Under the same assumptions, this method will still apply Logarithmic Regression to predict LTV given a user retention period of 180 day. However, as LTV are being calculated for each month, we will extract the data from the daily cohort ARPPU and calculate the weighted average ARPPU for each month instead of for all months as in the previous problem. With each month from January to December, a Logarithmic Regression model will be fitted based on the daily cohort ARPPU of previous months (including the current one). With each fit, we obtain the regression coefficients to compute the corresponding 180-day LTV.
+
+The following column chart of monthly LTV is obtained:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate LTV for each month
+# Note that for each month, we are only taking account into the data of the current month and the previous ones. For example, in March, the first date in the data is "2016/01/01" and the last date is "2016/31/03" so it is not possible to include columns like "300" (meaning 300 days from the registration date), because there could not be 300 days from any date when the data is from January to March.
+
+# Create a data frame to store LTV
+projected_ltv <- c()
+
+# Iterating through each month
+for(i in 1:12) {
+  # Create a textual index of each month. For example: 1 -> "01", 2 -> "02",..., 12 -> "12"
+  index <- as.character(i)
+  if(i < 10) index <- paste("0", index, sep="")
+  
+  # Get only the ARPPU data of the previous months and the current one
+  monthly_arppu <- daily_arppu[substring(daily_arppu$reg_date, 6, 7) <= index,]
+  # Rename the columns of the data (for easier iterating)
+  colnames(monthly_arppu) <- c("reg_date", "registrations", 1:(ncol(monthly_arppu)-2))
+  # Compute the number of days between the first and last date in the 
+  no_of_days <- as.numeric(difftime(as.Date(monthly_arppu$reg_date[nrow(monthly_arppu)]), as.Date(monthly_arppu$reg_date[1]), "days")) + 1
+  
+  # Remove the number of days due to missing days presented in some columns
+  if(i == 10) no_of_days <- no_of_days - 1
+  if(i == 11) no_of_days <- no_of_days - 2
+  if(i == 12) no_of_days <- ncol(daily_arppu) - 2
+  
+  # Gather only the data from first date to last date
+  monthly_arppu <- monthly_arppu[, c(1:(no_of_days + 2))]
+  
+  # Create a value gatherer
+  weighted_av <- c()
+  
+  for(j in 2:ncol(monthly_arppu)) {
+    # Compute weighted average for each day
+    weighted_av <- c(weighted_av, weighted.mean(head(monthly_arppu[j], no_of_days), head(monthly_arppu[2], no_of_days), na.rm=TRUE))
+    # Reduce the limit of number of days as we iterate through each days
+    no_of_days <- no_of_days - 1
+  }
+
+  # Create a Logarithmic Regression fit given each weighted average vector 
+  fit <- lm(unlist(weighted_av) ~ log(unlist(1:length(weighted_av))))
+  
+  # Compute the LTV based on the fit coefficients
+  projected_ltv <- c(projected_ltv, coef(fit)[[1]] + coef(fit)[[2]] * log(180))
+}
+
+# Create a monthly LTV data frame (for plotting purposes)
+ltv_df <- data.frame(x=time_series_revenue$month, y=projected_ltv)
+```
+
+```{r, echo=FALSE, message=FALSE, fig.width=10, fig.height=6, out.width='90%', fig.align='center'}
+# Plot monthly LTV
+ggplot(data=ltv_df, aes(x=x, y=y, group=1)) +
+  geom_bar(stat="identity", fill="deepskyblue2") +
+  geom_smooth(method="loess", level=0, aes(color="Trend line")) +
+  coord_cartesian(ylim=c(5.5, NA)) +
+  scale_color_manual(values=c("Mean LTV"="coral", "Trend line"="red")) +
+  geom_abline(aes(slope=0, intercept=mean(projected_ltv), color="Mean LTV"), linetype="dashed", linewidth=1) +
+  labs(x="Month", y="Lifetime revenue (in USD)", title="Monthly LTV for 2016", color="Legend") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"), 
+        legend.position = "top",
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+While the LTV hits the bottom in September with around USD 1.5 below the mean, it peaks higher at around USD 2 above the mean. It is also worthwhile to notice that the most noticeable LTV changes during this year are mostly downfalls, occurring during from January to February, May to June, August to September with around over USD 1 lost in customer value. For the first half (January to May) of the year, though the LTV has some considerable falling actions, it remains above the mean the whole time. In the opposite, during the rest of the year (June to December), the LTV is below the mean line, with some of the months in the middle of the year like June, July and September being the (negatively) furthest from the mean LTV. This is with the exception of November, which is the only month during the second half having the LTV value larger than the mean, though very slightly. From the trend line, we can also observe the overall trend of LTV throughout January to December is downward. However, if we analyze the changes of LTV through the column plot, the trend of LTV is actually relatively similar to the monthly revenue, remaining at the peak at the beginning of the year, gradually decreasing until May, then remaining stable until suddenly reaching a low bottom in September and bounce back in October. This shows that the LTV fluctuations are somewhat sensitive to the revenue fluctuations and the changes in LTV therefore can be addressed to changes in total in-game revenue.
+
+We may also look at the LTV with user segmentation by platforms applied to understand the LTV of users acquired through different channels (iOS and Android).
+
+First, we have to segment the user by platforms. The daily cohort ARPPU table above is separated by `created_platform` and a snapshot can be provided as follows:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a table calculating segmented daily ARPPU for each platform
+daily_arppu_segmented <- dbGetQuery(conn, "
+                        SELECT 
+                          reg_date, 
+                          days_from_reg,
+                          created_platform,
+                          SUM(revenue) / COUNT(DISTINCT account_id) AS 'ARPPU',
+                          registrations
+                          
+                        FROM
+                          (SELECT 
+                            iap_purchase.account_id,
+                            created_platform,
+                            SUBSTRING(account.created_time, 1, 10) AS 'reg_date',
+                            CAST(( JulianDay(iap_purchase.created_time) - JulianDay(account.created_time) + 1)
+                                   AS INTEGER ) AS 'days_from_reg',
+                            iap_price_usd_cents / 100.0 AS 'revenue'
+                          FROM iap_purchase, account
+                          WHERE iap_purchase.account_id = account.account_id)
+                          
+                        LEFT JOIN (   
+                          SELECT 
+                            reg_date AS 'reg_date1',
+                            created_platform AS 'cp',
+                            COUNT(DISTINCT account_id) AS 'registrations'
+                            
+                          FROM
+                            (SELECT 
+                              iap_purchase.account_id,
+                              created_platform,
+                              SUBSTRING(account.created_time, 1, 10) AS 'reg_date'
+                            FROM iap_purchase, account
+                            WHERE iap_purchase.account_id = account.account_id)
+                            
+                          GROUP BY reg_date, created_platform
+                        ) AS 'regis' 
+                        ON regis.reg_date1 = reg_date AND regis.cp = created_platform 
+                        
+                        GROUP BY reg_date, days_from_reg, created_platform
+                        ORDER BY reg_date, days_from_reg, created_platform
+                       ")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Create a pivot table based on the obtained table
+daily_arppu_segmented <- pivot_wider(data=daily_arppu_segmented, names_from=days_from_reg, values_from=ARPPU)
+ordered_col <- as.character(sort(as.numeric(colnames(daily_arppu_segmented)[!colnames(daily_arppu_segmented) %in% c("reg_date", "registrations", "created_platform")])))
+daily_arppu_segmented <- daily_arppu_segmented[,c("reg_date", "registrations", "created_platform", order_col)]
+
+# Divide the data into two tables for each platform
+daily_arppu_ios <- daily_arppu_segmented[daily_arppu_segmented$created_platform == "iOS",]
+daily_arppu_android <- daily_arppu_segmented[daily_arppu_segmented$created_platform == "Android",]
+
+# Print the pivot table
+head(daily_arppu_segmented[1:8], 5) %>% gt() 
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate monthly LTV for each platform (iOS) using the EXACT SAME method as calculating overall monthly LTV
+days <- data.frame(x=as.numeric(colnames(daily_arppu_ios)[!colnames(daily_arppu_ios) %in% c("reg_date", "registrations", "created_platform")]))
+projected_ltv_ios <- c()
+
+for(i in 1:12) {
+  index <- as.character(i)
+  if(i < 10) index <- paste("0", index, sep="")
+  
+  monthly_arppu <- daily_arppu_ios[substring(daily_arppu_ios$reg_date, 6, 7) <= index,]
+  colnames(monthly_arppu) <- c("reg_date", "registrations", 1:(ncol(monthly_arppu)-2))
+  no_of_days <- as.numeric(difftime(as.Date(monthly_arppu$reg_date[nrow(monthly_arppu)]), as.Date(monthly_arppu$reg_date[1]), "days")) + 1
+  
+  if(i == 10) no_of_days <- no_of_days - 1
+  if(i == 11) no_of_days <- no_of_days - 2
+  if(i == 12) no_of_days <- ncol(daily_arppu_ios) - 2
+  
+  monthly_arppu <- monthly_arppu[, c(1:(no_of_days + 2))]
+  
+  weighted_av <- c()
+  for(j in 4:ncol(monthly_arppu)) {
+    weighted_av <- c(weighted_av, weighted.mean(head(monthly_arppu[j], no_of_days), head(monthly_arppu[2], no_of_days), na.rm=TRUE))
+    no_of_days <- no_of_days - 1
+  }
+
+  fit <- lm(unlist(weighted_av) ~ log(unlist(1:length(weighted_av))))
+  projected_ltv_ios <- c(projected_ltv_ios, coef(fit)[[1]] + coef(fit)[[2]] * log(180))
+}
+```
+
+```{r, echo=FALSE, comment="", message=FALSE}
+# Calculate monthly LTV for each platform (Android) using the EXACT SAME method as calculating overall monthly LTV
+days <- data.frame(x=as.numeric(colnames(daily_arppu_android)[!colnames(daily_arppu_android) %in% c("reg_date", "registrations", "created_platform")]))
+projected_ltv_android <- c()
+
+for(i in 1:12) {
+  index <- as.character(i)
+  if(i < 10) index <- paste("0", index, sep="")
+  
+  monthly_arppu <- daily_arppu_android[substring(daily_arppu_android$reg_date, 6, 7) <= index,]
+  colnames(monthly_arppu) <- c("reg_date", "registrations", 1:(ncol(monthly_arppu)-2))
+  no_of_days <- as.numeric(difftime(as.Date(monthly_arppu$reg_date[nrow(monthly_arppu)]), as.Date(monthly_arppu$reg_date[1]), "days")) + 1
+  
+  if(i == 10) no_of_days <- no_of_days - 1
+  if(i == 11) no_of_days <- no_of_days - 2
+  if(i == 12) no_of_days <- ncol(daily_arppu_android) - 2
+  
+  monthly_arppu <- monthly_arppu[, c(1:(no_of_days + 2))]
+  
+  weighted_av <- c()
+  for(j in 4:ncol(monthly_arppu)) {
+    weighted_av <- c(weighted_av, weighted.mean(head(monthly_arppu[j], no_of_days), head(monthly_arppu[2], no_of_days), na.rm=TRUE))
+    no_of_days <- no_of_days - 1
+  }
+
+  fit <- lm(unlist(weighted_av) ~ log(unlist(1:length(weighted_av))))
+  projected_ltv_android <- c(projected_ltv_android, coef(fit)[[1]] + coef(fit)[[2]] * log(180))
+}
+```
+
+```{r, echo=FALSE, comment="", message=FALSE}
+# Create a monthly LTV data frame for each platform (for plotting purposes) 
+ltv_df_ios <- data.frame(x=time_series_revenue$month, y=projected_ltv_ios)
+ltv_df_android <- data.frame(x=time_series_revenue$month, y=projected_ltv_android)
+```
+
+After performing the same steps for each platform Android and iOS separately to generate monthly LTV calculations from January to December, the following plots and table are obtained:
+
+- **Monthly LTV for iOS users** tracks the monthly LTV of a paying user using iOS devices from January to December.
+- **Monthly LTV for Android users** tracks the monthly LTV of a paying user using Android devices from January to December.
+- **Number of user across platforms** measures the number of paying user for each platform.
+
+```{r, echo=FALSE, results='hide', fig.width=14, fig.height=6, message=FALSE}
+# Plot monthly LTV for each platform (iOS)
+plot1 <- ggplot(data=ltv_df_ios, aes(x=x, y=y, group=1)) +
+  geom_bar(stat="identity", fill="deepskyblue2") +
+  geom_smooth(method="loess", level=0, aes(color="Trend line")) +
+  coord_cartesian(ylim=c(4, 12.1)) +
+  scale_color_manual(values=c("Mean LTV"="coral", "Trend line"="red")) +
+  geom_abline(aes(slope=0, intercept=mean(projected_ltv_ios), color="Mean LTV"), linetype="dashed", linewidth=1) +
+  labs(x="Month", y="Lifetime revenue (in USD)", title="Monthly LTV for iOS users", color="Legend") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"), 
+        legend.position = "top",
+        axis.title.x = element_text(size=13), 
+        axis.title.y = element_text(size=13), 
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Plot monthly LTV for each platform (Android)
+plot2 <- ggplot(data=ltv_df_android, aes(x=x, y=y, group=1)) +
+  geom_bar(stat="identity", fill="deepskyblue2") +
+  geom_smooth(method="loess", level=0, aes(color="Trend line")) +
+  coord_cartesian(ylim=c(4, 12.1)) +
+  geom_abline(aes(slope=0, intercept=mean(projected_ltv_android), color="Mean LTV"), linetype="dashed", linewidth=1) +
+  scale_color_manual(values=c("Mean LTV"="coral", "Trend line"="red")) +
+  labs(x="Month", y="Lifetime revenue (in USD)", title="Monthly LTV for Android users", color="Legend") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"), 
+        legend.position = "top",
+        axis.title.x = element_text(size=13), 
+        axis.title.y = element_text(size=13), 
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linewidth=.1, color="grey"),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+# Align the plots
+ggdraw() + 
+  draw_plot(plot1, x=0, y=0, width=0.5, height=1) +
+  draw_plot(plot2, x=0.5, y=0, width=0.5, height=1)
+```
+
+```{r, echo=FALSE, fig.width=8, fig.height=4, message=FALSE}
+# Create a table calculating the number of user for each platform
+platform_count <- dbGetQuery(conn, "
+                              SELECT 
+                                created_platform,
+                                COUNT(DISTINCT iap_purchase.account_id) AS 'user_count'
+                              FROM iap_purchase, account
+                              WHERE iap_purchase.account_id = account.account_id
+                              GROUP BY created_platform
+                             ")
+
+# Print the table
+platform_count %>% gt() %>% tab_header(title="Number of user across platforms")
+```
+
+With only around 26% of total players, iOS users in general have greater LTV than Android users (74% of total players) throughout the year. This is visible from the mean lines from both graphs, where it is clear that the mean LTV of iOS users are around USD 1.5 higher compared to the mean LTV of Android player. It is also worthwhile to notice the trend of LTV for both platform. The monthly LTV of Android players slightly resembles the overall LTV by gradually falling since January and remaining stably low throughout the year. Meanwhile, the monthly LTV of iOS player has the almost opposite trend, where it is observed to rise considerably from January and remain at high level of LTV. Although the peak LTV of iOS user are not as high as that of Android user, the trough LTV of iOS user is not as low; moreover, for most of the time, the LTV of iOS user remain higher. This shows that even though iOS users only have a smaller portion of total player population compared to Android users, they are more monetarily valuable and are more likely to spend.
+  
+# References
+Olteanu, A., *Country Mapping - ISO, Continent, Region*. https://www.kaggle.com/datasets/andradaolteanu/country-mapping-iso-continent-region
+
+Seufert, E., *Leveraging Customer Lifetime Value for user acquisition campaigns*. 2014. https://www.slideshare.net/AppLift/ltv-webinar-presentation
+
+
+
