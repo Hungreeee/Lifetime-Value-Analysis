@@ -1,5 +1,5 @@
 # Supercell-test
-Perform data analysis based on a sample mobile game database using R and SQLite.
+Perform data analysis based on a hypothetical mobile game database using R and SQLite.
 
 ## Warm-up tasks
 Analyze monthly revenue throughout 2016. 
