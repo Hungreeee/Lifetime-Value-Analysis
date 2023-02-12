@@ -1,4 +1,4 @@
-# Supercell-test
+# Lifetime-value-Analysis
 Perform data analysis based on a hypothetical mobile game database created by Supercell using R and SQLite.
 
 ## Warm-up tasks
