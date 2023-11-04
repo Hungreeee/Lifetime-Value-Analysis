@@ -1,5 +1,5 @@
 # Lifetime-value-Analysis
-Perform data analysis based on a hypothetical mobile game database created by Supercell using R and SQLite.
+Perform data analysis based on a hypothetical mobile game database created by Supercell as a test using R and SQLite.
 
 ## Warm-up tasks
 Analyze monthly revenue throughout 2016. 
